@@ -76,56 +76,12 @@ st.markdown(
 
 
 # ============================================================================
-# Sidebar
-# ============================================================================
-
-with st.sidebar:
-    st.header("Underlying")
-    ticker = st.text_input(
-        "Ticker symbol", value="SPY",
-        help="Any US-listed ticker with options. Try SPY, QQQ, AAPL, NVDA, TSLA.",
-    ).strip().upper()
-
-    st.divider()
-    st.header("Chain filters")
-    max_expiries = st.slider("Number of expiries", 4, 20, 12,
-                              help="Stratified across the term structure.")
-    min_oi  = st.slider("Minimum open interest", 0, 100, 5)
-    min_dte = st.slider("Minimum days to expiry", 1, 60, 7)
-
-    st.divider()
-    st.header("View")
-
-    SIDE_LABELS = {
-        "OTM": "Out-of-the-money wings (recommended)",
-        "calls": "Calls only",
-        "puts":  "Puts only",
-        "both":  "All contracts",
-    }
-    side = st.radio("Which contracts", list(SIDE_LABELS),
-                     format_func=SIDE_LABELS.__getitem__, index=0)
-    st.caption(
-        "Affects every tab. Ranking & top-N controls live inside the "
-        "**Top deviations** tab itself — they only apply there."
-    )
-
-    # Defaults for the table tab; the actual widgets live in that tab.
-    METRIC_LABELS = {
-        "residual_iv": "Absolute IV miss (recommended)",
-        "zscore":      "Spread-normalised z-score",
-        "dollar":      "Dollar P&L impact",
-    }
-
-    st.divider()
-    rate_curve = _rate_curve()
-    st.caption(
-        "Live rates from FRED" if rate_curve.source == "fred"
-        else "Bundled Treasury snapshot · set FREDAPI_KEY for live"
-    )
-
-
-# ============================================================================
 # Cached fetch + analytics
+#
+# Defined before the sidebar so the sidebar's RiskFreeCurve caption
+# can call _rate_curve() at render time. Streamlit executes the file
+# top-to-bottom on every interaction, so anything the sidebar uses
+# must already exist by then.
 #
 # Streamlit's @st.cache_data pickles return values, which loses
 # DataFrame.attrs and chokes on custom dataclasses. We work around
@@ -187,6 +143,55 @@ def get_earnings(ticker: str):
 @st.cache_data(ttl=600, show_spinner="Pulling historical prices…")
 def get_realized_vol(ticker: str, window: int):
     return compute_realized_vol(ticker, period="1y", window_days=window)
+
+
+# ============================================================================
+# Sidebar
+# ============================================================================
+
+with st.sidebar:
+    st.header("Underlying")
+    ticker = st.text_input(
+        "Ticker symbol", value="SPY",
+        help="Any US-listed ticker with options. Try SPY, QQQ, AAPL, NVDA, TSLA.",
+    ).strip().upper()
+
+    st.divider()
+    st.header("Chain filters")
+    max_expiries = st.slider("Number of expiries", 4, 20, 12,
+                              help="Stratified across the term structure.")
+    min_oi  = st.slider("Minimum open interest", 0, 100, 5)
+    min_dte = st.slider("Minimum days to expiry", 1, 60, 7)
+
+    st.divider()
+    st.header("View")
+
+    SIDE_LABELS = {
+        "OTM": "Out-of-the-money wings (recommended)",
+        "calls": "Calls only",
+        "puts":  "Puts only",
+        "both":  "All contracts",
+    }
+    side = st.radio("Which contracts", list(SIDE_LABELS),
+                     format_func=SIDE_LABELS.__getitem__, index=0)
+    st.caption(
+        "Affects every tab. Ranking & top-N controls live inside the "
+        "**Top deviations** tab itself — they only apply there."
+    )
+
+    # Defaults for the table tab; the actual widgets live in that tab.
+    METRIC_LABELS = {
+        "residual_iv": "Absolute IV miss (recommended)",
+        "zscore":      "Spread-normalised z-score",
+        "dollar":      "Dollar P&L impact",
+    }
+
+    st.divider()
+    rate_curve = _rate_curve()
+    st.caption(
+        "Live rates from FRED" if rate_curve.source == "fred"
+        else "Bundled Treasury snapshot · set FREDAPI_KEY for live"
+    )
 
 
 # ============================================================================
