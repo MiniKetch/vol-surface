@@ -252,9 +252,17 @@ def _filter(
     max_spread: float,
     require_volume: bool,
 ) -> pd.DataFrame:
-    """Apply the standard liquidity / quality filters."""
+    """Apply the standard liquidity / quality filters.
+
+    Note on the bid filter: deep-OTM contracts on illiquid names often
+    quote bid=0 with a real ask (no buyers, but a market-maker is
+    willing to sell). Hard-rejecting bid=0 wipes out half the chain on
+    smaller-cap tickers. Instead we keep the row but treat ``mid = ask/2``
+    upstream — the bid==0 case is captured naturally by the spread_pct
+    filter (which is > 100 % when bid=0).
+    """
     keep = (
-        df["bid"].notna() & (df["bid"] > 0) &
+        df["bid"].notna() & (df["bid"] >= 0) &
         df["ask"].notna() & (df["ask"] > 0) &
         df["mid"].notna() & (df["mid"] > 0) &
         df["spread_pct"].notna() & (df["spread_pct"] <= max_spread) &

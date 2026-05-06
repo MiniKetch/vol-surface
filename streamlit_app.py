@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import dataclasses
+
 from vol_surface.analytics import (
     compute_realized_vol,
     compute_skew_metrics,
@@ -24,8 +26,9 @@ from vol_surface.data import (
     fetch_earnings,
     flag_event_expiries,
 )
-from vol_surface.scanner import scan_mispricing
+from vol_surface.scanner import MispricingReport, scan_mispricing
 from vol_surface.strategy import compute_payoff, parse_strategy, render_payoff
+from vol_surface.utils import attach_attrs, extract_attrs, get_attr
 from vol_surface.viz import (
     render_smile,
     render_smile_evolution,
@@ -114,7 +117,7 @@ with st.sidebar:
     }
 
     st.divider()
-    rate_curve = RiskFreeCurve()
+    rate_curve = _rate_curve()
     st.caption(
         "Live rates from FRED" if rate_curve.source == "fred"
         else "Bundled Treasury snapshot · set FREDAPI_KEY for live"
@@ -123,26 +126,60 @@ with st.sidebar:
 
 # ============================================================================
 # Cached fetch + analytics
+#
+# Streamlit's @st.cache_data pickles return values, which loses
+# DataFrame.attrs and chokes on custom dataclasses. We work around
+# that by:
+#   - returning (df, attrs_dict) from cached chain/fit fns and
+#     re-attaching attrs at the call site;
+#   - returning primitive tuples for tiny dataclasses (earnings);
+#   - using @st.cache_resource for stateful objects (RiskFreeCurve).
 # ============================================================================
 
+@st.cache_resource(show_spinner=False)
+def _rate_curve() -> RiskFreeCurve:
+    """RiskFreeCurve holds NumPy arrays + a string `source` flag — no
+    reason to re-instantiate per render. cache_resource keeps the
+    object identity stable across reruns."""
+    return RiskFreeCurve()
+
+
 @st.cache_data(ttl=300, show_spinner="Pulling options chain…")
-def load_chain(ticker: str, max_expiries: int, min_oi: int, min_dte: int):
+def _load_chain_raw(ticker: str, max_expiries: int, min_oi: int, min_dte: int):
+    """Raw cached fetch. Returns (DataFrame, attrs_dict) so the
+    caller can re-attach .attrs after Streamlit's pickle round-trip."""
     fetcher = DataFetcher(use_cache=False)
-    return fetcher.get(
+    df = fetcher.get(
         ticker, max_expiries=max_expiries,
         min_open_interest=min_oi, min_dte_days=min_dte,
     )
+    return df, extract_attrs(df)
+
+
+def load_chain(ticker: str, max_expiries: int, min_oi: int, min_dte: int):
+    """Public wrapper — calls the cached fn and rehydrates .attrs."""
+    df, attrs = _load_chain_raw(ticker, max_expiries, min_oi, min_dte)
+    return attach_attrs(df, attrs)
 
 
 @st.cache_data(ttl=300, show_spinner="Fitting SVI per expiry…")
-def fit_scanner(_df: pd.DataFrame, side: str):
-    return scan_mispricing(_df, side=side)
+def _fit_scanner_raw(_df: pd.DataFrame, side: str):
+    """Raw cached fit. Returns (scored_df, fits_dict, attrs) so that
+    the report's DataFrame can be reconstructed with metadata intact."""
+    report = scan_mispricing(_df, side=side)
+    return report.scored, report.fits, extract_attrs(report.scored)
+
+
+def fit_scanner(df: pd.DataFrame, side: str) -> MispricingReport:
+    scored, fits, attrs = _fit_scanner_raw(df, side)
+    attach_attrs(scored, attrs)
+    return MispricingReport(scored=scored, fits=fits)
 
 
 @st.cache_data(ttl=900, show_spinner="Looking up earnings calendar…")
 def get_earnings(ticker: str):
-    """Return primitives — Streamlit's cache_data uses pickle and
-    won't serialize our custom EarningsInfo dataclass."""
+    """Return primitives — Streamlit's cache_data won't serialize
+    our custom EarningsInfo dataclass."""
     info = fetch_earnings(ticker)
     return (info.next_date, info.source)
 
@@ -158,15 +195,23 @@ def get_realized_vol(ticker: str, window: int):
 
 try:
     df = load_chain(ticker, max_expiries, min_oi, min_dte)
-except Exception as exc:  # noqa: BLE001
+except (RuntimeError, ValueError, KeyError) as exc:
     st.error(f"Couldn't fetch **{ticker}**: {exc}")
     st.info("Common typos: 'APPL' → 'AAPL', 'NVIDIA' → 'NVDA'.")
     st.stop()
 
-spot       = df.attrs["spot"]
+# Use get_attr() consistently — survives any future pandas .attrs
+# regression more gracefully than raw indexing.
+spot       = float(get_attr(df, "spot", 0.0))
 n_iv       = int(df["iv"].notna().sum())
 recovery   = n_iv / max(len(df), 1) * 100
-fetched_at = df.attrs.get("fetched_at")
+fetched_at = get_attr(df, "fetched_at")
+
+# Single SVI fit, shared across every tab below — instead of one
+# fit_scanner call per tab. Streamlit's cache makes repeated calls
+# fast on hits, but the deserialization + .attrs reattachment is
+# pure waste when one call answers them all.
+report = fit_scanner(df, side)
 
 # Earnings — cheap, do it once per ticker.
 earnings_next_date, earnings_source = get_earnings(ticker)
@@ -206,7 +251,7 @@ def _suggest_default_strategy(df: pd.DataFrame) -> str:
     expiry, using strikes that *actually exist* in the chain. Works
     for any ticker scale: SPY → 730/740, AAPL → 285/290, NVDA → 130/135.
     """
-    spot = float(df.attrs.get("spot", 0.0))
+    spot = float(get_attr(df, "spot", 0.0))
     if spot <= 0 or df.empty or "expiry" not in df.columns:
         return "long 1 100C 2026-06-18"  # safe fallback
 
@@ -245,7 +290,7 @@ def _build_strategy_from_preset(preset: str, df: pd.DataFrame) -> str:
     canonical position string. Each preset shows whichever subset of
     inputs it needs (qty, expiry, strike picker(s)) — strikes are
     pulled from the actual chain so they're always real."""
-    spot = float(df.attrs.get("spot", 100.0))
+    spot = float(get_attr(df, "spot", 100.0))
     expiries = sorted(df["expiry"].dropna().unique())
     if not expiries:
         return "long 1 100C 2026-06-18"
@@ -482,8 +527,6 @@ with tab_smile:
     if not expiries:
         st.warning("No expiries — relax the min OI / DTE filters.")
     else:
-        report = fit_scanner(df, side)
-
         # Annotate expiries in the picker with 📅 if they straddle earnings.
         def _label(e):
             ts = pd.Timestamp(e)
@@ -526,7 +569,6 @@ with tab_smile:
 # --------------------------- Term structure --------------------------------
 
 with tab_term:
-    report = fit_scanner(df, side)
     fig = render_term_structure(df, fits=report.fits)
     st.plotly_chart(fig, width="stretch", height=560, key="term_chart")
     st.caption(
@@ -543,7 +585,6 @@ with tab_term:
 # --------------------------- Smile evolution -------------------------------
 
 with tab_evo:
-    report = fit_scanner(df, side)
     if not report.fits:
         st.info("No SVI fits available — relax filters or try a more liquid name.")
     else:
@@ -561,7 +602,6 @@ with tab_evo:
 # --------------------------- Skew metrics ---------------------------------
 
 with tab_skew:
-    report = fit_scanner(df, side)
     if not report.fits:
         st.info("No fits to compute skew on.")
     else:
@@ -574,7 +614,7 @@ with tab_skew:
         skew_df = compute_skew_metrics(
             report.fits, spot=spot,
             risk_free=float(df["r"].dropna().median()) if "r" in df else 0.04,
-            dividend_yield=float(df.attrs.get("dividend_yield", 0.0)),
+            dividend_yield=float(get_attr(df, "dividend_yield", 0.0)),
         )
         if skew_df.empty:
             st.info("Couldn't compute skew metrics for any expiry.")
@@ -677,18 +717,23 @@ with tab_rv:
     rv_window = st.slider("Realized-vol window (trading days)", 5, 90, 30,
                            key="rv_window")
     try:
-        rv = get_realized_vol(ticker, rv_window)
-    except Exception as exc:  # noqa: BLE001
+        rv_cached = get_realized_vol(ticker, rv_window)
+    except (RuntimeError, ValueError, KeyError) as exc:
         st.error(f"Couldn't fetch history: {exc}")
     else:
-        # Attach the current ATM IV (closest expiry, ~30 days out).
-        report = fit_scanner(df, side)
+        # Build a *fresh* RealizedVolSeries instead of mutating the
+        # cached one — Streamlit's cache hands the same object back
+        # on every render, and mutation contaminates future calls
+        # with stale atm_iv from the previous tab visit.
+        atm_iv = None
+        atm_expiry = None
         if report.fits:
             target_T = rv_window / 252.0
             best = min(report.fits.items(),
                         key=lambda kv: abs(kv[1].T - target_T))
-            rv.atm_iv = float(best[1].iv(np.array([0.0]))[0])
-            rv.atm_expiry = pd.Timestamp(best[0])
+            atm_iv = float(best[1].iv(np.array([0.0]))[0])
+            atm_expiry = pd.Timestamp(best[0])
+        rv = dataclasses.replace(rv_cached, atm_iv=atm_iv, atm_expiry=atm_expiry)
 
         fig = render_realized_vs_implied(rv)
         st.plotly_chart(fig, width="stretch", height=560, key="rv_chart")
@@ -718,7 +763,6 @@ with tab_table:
     with col_top:
         top_n = st.slider("Top N", 5, 50, 15)
 
-    report = fit_scanner(df, side)
     top = report.top(n=top_n, side="both", by=rank_by)
     if top.empty:
         st.info("No contracts surfaced — try a different metric or relax filters.")

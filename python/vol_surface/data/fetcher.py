@@ -82,8 +82,12 @@ class DataFetcher:
     def _load_chain(self, ticker: str, **fetch_kwargs) -> OptionsChain:
         cache_path = self._cache_path(ticker, fetch_kwargs) if self.cache_dir else None
         if cache_path and cache_path.exists():
-            age = dt.datetime.now() - dt.datetime.fromtimestamp(cache_path.stat().st_mtime)
-            if age < self.cache_ttl:
+            # Use UTC throughout — st_mtime is a POSIX epoch timestamp,
+            # so build the comparison timestamp with the same reference.
+            mtime = dt.datetime.fromtimestamp(cache_path.stat().st_mtime,
+                                               tz=dt.timezone.utc)
+            now   = dt.datetime.now(dt.timezone.utc)
+            if (now - mtime) < self.cache_ttl:
                 return _load_cached_chain(cache_path)
 
         chain = fetch_chain(ticker, **fetch_kwargs)
@@ -93,17 +97,22 @@ class DataFetcher:
         return chain
 
     def _cache_path(self, ticker: str, fetch_kwargs: dict) -> Path:
-        """Cache key includes the fetch params, so changing max_expiries
-        or DTE bounds invalidates the cache rather than reusing a stale
-        narrower fetch."""
+        """Cache key includes *every* fetch kwarg, so adding a new
+        parameter to ``fetch_chain`` invalidates stale caches
+        automatically — no risk of silently serving a cache built
+        with different filter settings."""
         assert self.cache_dir is not None
         import hashlib
         date_tag = dt.date.today().isoformat()
-        # Stable hash of the kwargs that affect what gets fetched.
-        relevant = {k: fetch_kwargs.get(k) for k in (
-            "max_expiries", "min_dte_days", "max_dte_days",
-            "min_open_interest", "max_spread_pct", "require_volume",
-        ) if k in fetch_kwargs}
+        # Reflect on fetch_chain's signature so we hash *every* kwarg
+        # that could change the result, not a hand-curated list.
+        import inspect
+        sig = inspect.signature(fetch_chain)
+        relevant_keys = [
+            name for name in sig.parameters
+            if name not in ("ticker",) and name in fetch_kwargs
+        ]
+        relevant = {k: fetch_kwargs[k] for k in relevant_keys}
         key = repr(sorted(relevant.items())).encode()
         param_hash = hashlib.sha1(key).hexdigest()[:8]
         return self.cache_dir / f"{ticker.upper()}_{date_tag}_{param_hash}.parquet"

@@ -307,24 +307,57 @@ def render_payoff(
 # ---------------------------------------------------------------------------
 
 def _lookup_leg_context(leg: Leg, df: pd.DataFrame):
-    """Find IV/T/r/q for a leg by matching to the closest chain contract."""
-    expiry = pd.Timestamp(leg.expiry).normalize()
-    same_expiry = df[(pd.to_datetime(df["expiry"]).dt.normalize() == expiry) &
-                     (df["type"] == leg.option_type)]
+    """Find IV/T/r/q for a leg by matching against the chain.
+
+    Date matching uses ``.dt.date == leg.expiry.date()`` rather than
+    normalized-Timestamp equality — yfinance and parsed-from-string
+    expiries can have timezone or tzinfo mismatches that silently
+    fail equality even when they're the same trading day.
+
+    When the leg's exact strike isn't in the chain, we *linearly
+    interpolate* IV between the two surrounding strikes (in
+    log-moneyness space) rather than using the closest strike's IV
+    blindly. The latter biases pricing for legs sitting between the
+    chain's listed strikes.
+    """
+    leg_date = pd.Timestamp(leg.expiry).date()
+    same_expiry = df[
+        (pd.to_datetime(df["expiry"]).dt.date == leg_date) &
+        (df["type"] == leg.option_type)
+    ].dropna(subset=["iv"])
     if same_expiry.empty:
         return None, None, None, None, "no matching expiry/type in chain"
 
-    # Closest strike.
-    same_expiry = same_expiry.dropna(subset=["iv"])
-    if same_expiry.empty:
-        return None, None, None, None, "matching expiry has no usable IVs"
-    idx = (same_expiry["strike"] - leg.strike).abs().idxmin()
-    row = same_expiry.loc[idx]
-    return (float(row["iv"]),
-            float(row["ttm"]),
-            float(row["r"]),
-            float(row["q"]),
-            f"matched K={row['strike']:.2f}")
+    same_expiry = same_expiry.sort_values("strike").reset_index(drop=True)
+    strikes = same_expiry["strike"].to_numpy()
+
+    # Try exact match first (fast path, no interpolation noise).
+    exact = same_expiry[np.isclose(strikes, leg.strike)]
+    if not exact.empty:
+        row = exact.iloc[0]
+        return (float(row["iv"]), float(row["ttm"]),
+                float(row["r"]), float(row["q"]),
+                f"matched K={row['strike']:.2f}")
+
+    # Out-of-grid: clamp to the closest end of the chain.
+    if leg.strike <= strikes[0] or leg.strike >= strikes[-1]:
+        idx = int(np.argmin(np.abs(strikes - leg.strike)))
+        row = same_expiry.iloc[idx]
+        return (float(row["iv"]), float(row["ttm"]),
+                float(row["r"]), float(row["q"]),
+                f"clamped to nearest K={row['strike']:.2f}")
+
+    # In-grid: linear interpolation in IV between the surrounding strikes.
+    upper_idx = int(np.searchsorted(strikes, leg.strike))
+    lower_idx = upper_idx - 1
+    K_lo, K_hi = strikes[lower_idx], strikes[upper_idx]
+    iv_lo = float(same_expiry.iloc[lower_idx]["iv"])
+    iv_hi = float(same_expiry.iloc[upper_idx]["iv"])
+    alpha = (leg.strike - K_lo) / (K_hi - K_lo)
+    iv = iv_lo + alpha * (iv_hi - iv_lo)
+    row = same_expiry.iloc[lower_idx]
+    return (iv, float(row["ttm"]), float(row["r"]), float(row["q"]),
+            f"interpolated between K={K_lo:.2f} and K={K_hi:.2f}")
 
 
 def _leg_info(leg: Leg, iv, T, status: str) -> dict:

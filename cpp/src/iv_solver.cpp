@@ -98,11 +98,17 @@ std::optional<double> implied_vol(
     // only meaningful if the BS price is sensitive to σ at that point —
     // i.e. vega is non-trivial. Deep-OTM contracts with tiny prices
     // suffer subtractive cancellation in S·N(d1)−K·N(d2) and can
-    // accept any σ across a wide range. Reject those rather than
-    // return a fictitious answer.
-    constexpr double kMinVegaForResolvability = 1.0e-4;
+    // accept any σ across a wide range.
+    //
+    // The threshold is *relative to S* rather than absolute, because
+    // raw vega scales with S: a $5 stock's ATM vega is ~50× smaller
+    // than a $500 stock's. An absolute 1e-4 cutoff that's harmless
+    // for SPY silently NaNs out cheap-stock weeklies. ~1e-6 of S keeps
+    // the same intent (price has at least 1 ULP of sensitivity to σ
+    // on a typical mid-price) without that artefact.
+    const double kMinRelVegaForResolvability = 1.0e-6 * S;
     const auto greeks = bs_greeks(type, S, K, T, r, q, *root);
-    if (!(greeks.vega > kMinVegaForResolvability)) return std::nullopt;
+    if (!(greeks.vega > kMinRelVegaForResolvability)) return std::nullopt;
 
     return root;
 }

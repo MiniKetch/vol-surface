@@ -38,3 +38,48 @@ def test_flag_custom_window() -> None:
     expiries = [pd.Timestamp("2026-08-01")]   # 52 days after
     out = flag_event_expiries(expiries, earnings, window_days=60)
     assert out[expiries[0]] is True
+
+
+# ---------------------------------------------------------------------------
+# Regression: fetch_earnings now picks the *next* future date, not the
+# furthest-out one, when falling back to earnings_dates.
+# ---------------------------------------------------------------------------
+
+def test_fetch_earnings_history_picks_nearest_future_date(monkeypatch) -> None:
+    """The original implementation indexed `[-1]` (last) on a
+    chronologically-sorted future series, which gave the *furthest*
+    upcoming earnings date instead of the *next* one. After the fix
+    it should pick `[0]` (the nearest future date)."""
+    import pandas as pd
+    from vol_surface.data import earnings as earnings_module
+
+    # Build a fake yfinance Ticker with .calendar=None and an
+    # .earnings_dates Series spanning past + future dates.
+    class FakeTicker:
+        calendar = None
+        earnings_dates = pd.Series(
+            [None, None, None, None],
+            index=pd.DatetimeIndex([
+                "2025-01-15", "2025-04-30",   # past
+                "2026-08-01", "2027-02-15",   # future
+            ]),
+        )
+
+    class FakeYFModule:
+        Ticker = lambda self, t: FakeTicker()
+    fake_yf = FakeYFModule()
+
+    # Patch the import inside fetch_earnings.
+    import sys
+    sys.modules["yfinance"] = fake_yf
+    try:
+        # Also need pd.Timestamp.now to be deterministic so 'future' is
+        # well-defined relative to the test.
+        info = earnings_module.fetch_earnings("FAKE")
+    finally:
+        del sys.modules["yfinance"]
+
+    # Should pick the *nearest* future date = 2026-08-01, NOT 2027-02-15.
+    assert info.next_date == dt.date(2026, 8, 1), \
+        f"expected nearest future earnings, got {info.next_date}"
+    assert info.source == "history"

@@ -50,15 +50,19 @@ def fetch_earnings(ticker: str) -> EarningsInfo:
     # Fall back to earnings_dates (a Series indexed by date).
     try:
         ed = tk.earnings_dates
-    except Exception:  # noqa: BLE001
+    except (AttributeError, ValueError, KeyError):
         ed = None
     if ed is not None and len(ed) > 0:
         try:
             today = pd.Timestamp.now(tz=ed.index.tz) if ed.index.tz else pd.Timestamp.now()
-            future = ed[ed.index >= today]
+            future = ed[ed.index >= today].sort_index()
             if len(future) > 0:
-                return EarningsInfo(ticker, future.index[-1].date(), "history")
-        except Exception:  # noqa: BLE001
+                # The *next* earnings date is the earliest future
+                # observation, not the latest. The original code used
+                # [-1] which silently picked the furthest-out date and
+                # caused expiry flagging to mark wrong expiries.
+                return EarningsInfo(ticker, future.index[0].date(), "history")
+        except (AttributeError, ValueError, TypeError, KeyError):
             pass
 
     return EarningsInfo(ticker, None, "unavailable")

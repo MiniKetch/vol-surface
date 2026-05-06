@@ -125,3 +125,42 @@ def test_mtm_curve_above_payoff_outside_breakeven() -> None:
     # Around ATM, MTM should exceed expiry payoff (positive time value).
     atm_row = pnl[pnl["spot"].between(95, 105)]
     assert (atm_row["mtm"] >= atm_row["payoff"] - 1e-9).all()
+
+
+def test_leg_lookup_matches_by_calendar_date_not_timestamp() -> None:
+    """Regression: previously we did `.dt.normalize() == expiry`,
+    which silently failed when leg expiry was naive midnight and
+    chain expiry carried any tz/time info. The fix uses date-equality
+    so equivalent calendar days always match."""
+    df = _synthetic_chain()
+    # Re-stamp the chain's expiry to noon on the same calendar day —
+    # this is what some yfinance versions return.
+    chain_expiry_date = df["expiry"].iloc[0].date()
+    df["expiry"] = pd.Timestamp(chain_expiry_date) + pd.Timedelta(hours=12)
+
+    # The leg's parsed expiry from a string is naive midnight.
+    s = parse_strategy(f"long 1 100C {chain_expiry_date.isoformat()}")
+    pnl = compute_payoff(s, df, spot_lo=80, spot_hi=120, n_grid=21)
+
+    legs = pnl.attrs.get("legs_info", [])
+    assert legs and legs[0]["status"].startswith("matched"), \
+        f"expected leg-to-chain match, got status={legs[0]['status']!r}"
+
+
+def test_leg_strike_between_chain_strikes_uses_interpolation() -> None:
+    """Regression: previously we used the closest strike's IV but the
+    leg's strike for pricing — a bias when the leg sits between two
+    chain strikes. Now we linearly interpolate IV instead."""
+    df = _synthetic_chain()
+    expiry = df["expiry"].iloc[0]
+    # Insert a different IV at K=110 so interpolation between K=100
+    # (iv=0.25) and K=110 (iv=0.40) is detectably different from
+    # picking the closest strike.
+    df.loc[(df["strike"] == 110) & (df["type"] == "C"), "iv"] = 0.40
+    # Buy a call at K=105 — exactly halfway between two listed strikes.
+    s = parse_strategy(f"long 1 105C {expiry.date()}")
+    pnl = compute_payoff(s, df, spot_lo=80, spot_hi=120, n_grid=21)
+    legs = pnl.attrs.get("legs_info", [])
+    assert legs and "interpolated" in legs[0]["status"]
+    # The IV used should be the midpoint: (0.25 + 0.40) / 2 = 0.325.
+    assert legs[0]["iv"] == pytest.approx(0.325, abs=1e-6)

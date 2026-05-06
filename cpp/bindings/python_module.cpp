@@ -88,6 +88,58 @@ py::array_t<double> bs_price_batch(
 }
 
 // ----------------------------------------------------------------------------
+// Vectorized Greeks. Returns a (5, N) numpy array — rows are
+// delta/gamma/vega/theta/rho. Layout is contiguous along axis 1 so
+// slices like `out[2]` give a flat numpy view of vegas.
+// ----------------------------------------------------------------------------
+py::array_t<double> bs_greeks_batch(
+    py::array_t<std::int8_t, py::array::c_style | py::array::forcecast> types,
+    py::array_t<double,        py::array::c_style | py::array::forcecast> S,
+    py::array_t<double,        py::array::c_style | py::array::forcecast> K,
+    py::array_t<double,        py::array::c_style | py::array::forcecast> T,
+    py::array_t<double,        py::array::c_style | py::array::forcecast> r,
+    py::array_t<double,        py::array::c_style | py::array::forcecast> q,
+    py::array_t<double,        py::array::c_style | py::array::forcecast> sigma) {
+
+    const auto n = types.size();
+    if (S.size() != n || K.size() != n || T.size() != n
+        || r.size() != n || q.size() != n || sigma.size() != n) {
+        throw std::invalid_argument("All input arrays must have the same length");
+    }
+
+    py::array_t<double> out({py::ssize_t(5), n});
+    auto* out_ptr = out.mutable_data();
+    const auto* t_ptr = types.data();
+    const auto* S_ptr = S.data();
+    const auto* K_ptr = K.data();
+    const auto* T_ptr = T.data();
+    const auto* r_ptr = r.data();
+    const auto* q_ptr = q.data();
+    const auto* sg_ptr = sigma.data();
+
+    py::gil_scoped_release release;
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (py::ssize_t i = 0; i < n; ++i) {
+        const auto type = (t_ptr[i] == 0) ? OptionType::Call : OptionType::Put;
+        // Skip contracts that would NaN through the BS code; emit NaN
+        // for that whole column rather than a silent zero.
+        if (!(T_ptr[i] > 0.0) || !(sg_ptr[i] > 0.0) ||
+            !std::isfinite(S_ptr[i]) || !std::isfinite(K_ptr[i])) {
+            for (int row = 0; row < 5; ++row) out_ptr[row * n + i] = nan;
+            continue;
+        }
+        const auto g = vol::bs_greeks(type, S_ptr[i], K_ptr[i], T_ptr[i],
+                                      r_ptr[i], q_ptr[i], sg_ptr[i]);
+        out_ptr[0 * n + i] = g.delta;
+        out_ptr[1 * n + i] = g.gamma;
+        out_ptr[2 * n + i] = g.vega;
+        out_ptr[3 * n + i] = g.theta;
+        out_ptr[4 * n + i] = g.rho;
+    }
+    return out;
+}
+
+// ----------------------------------------------------------------------------
 // Vectorized implied vol.
 //
 // Returns NaN for any contract where IV could not be solved — this is
@@ -209,6 +261,13 @@ PYBIND11_MODULE(_vol_kernel, m) {
           py::arg("r"), py::arg("q"),
           "Vectorized IV solver. Failures (price below intrinsic, etc.) "
           "return NaN — use np.isnan() to filter.");
+
+    m.def("bs_greeks_batch", &bs_greeks_batch,
+          py::arg("types"), py::arg("S"), py::arg("K"), py::arg("T"),
+          py::arg("r"), py::arg("q"), py::arg("sigma"),
+          "Vectorized Greeks. Returns a (5, N) array — rows are "
+          "delta/gamma/vega/theta/rho. Degenerate inputs come back as "
+          "NaN columns.");
 
     m.def("strike_at_delta",
           [](OptionType t, double target_delta,

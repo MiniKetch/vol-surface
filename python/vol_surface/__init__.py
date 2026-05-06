@@ -39,6 +39,7 @@ from ._vol_kernel import (
     bs_greeks,
     implied_vol,
     bs_price_batch,
+    bs_greeks_batch,
     implied_vol_batch,
     strike_at_delta,
 )
@@ -50,6 +51,7 @@ __all__ = [
     "bs_greeks",
     "implied_vol",
     "bs_price_batch",
+    "bs_greeks_batch",
     "implied_vol_batch",
     "strike_at_delta",
 ]
