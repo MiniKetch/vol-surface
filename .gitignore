@@ -1,0 +1,47 @@
+# Build directories
+build/
+build-*/
+out/
+cmake-build-*/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# C++ build artifacts
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.exe
+*.a
+*.lib
+*.pdb
+
+# Wheels & dists
+dist/
+wheelhouse/
+*.whl
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Generated bindings
+*.pyd
+_vol_kernel*.so
+_vol_kernel*.pyd
+
+# Cache from yfinance / fred
+.cache/
+data_cache/

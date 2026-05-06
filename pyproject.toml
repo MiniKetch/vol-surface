@@ -1,0 +1,85 @@
+[build-system]
+# scikit-build-core is the modern replacement for the older `setup.py`-based
+# CMake bridges. It runs CMake during `pip install`, packages the result as
+# a wheel, and integrates with cibuildwheel for cross-platform CI builds.
+requires = [
+    "scikit-build-core>=0.7",
+    "pybind11>=2.11",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "vol-surface"
+version = "0.1.0"
+description = "Live options vol surface + SVI mispricing scanner — C++ kernel + Python orchestration"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Alex" }]
+keywords = ["options", "volatility", "black-scholes", "quant", "finance"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+data = [
+    "yfinance>=0.2.40",
+    "fredapi>=0.5",
+    "pandas>=2.0",
+]
+viz = [
+    "plotly>=5.20",
+    "scipy>=1.11",
+]
+dashboard = [
+    "streamlit>=1.30",
+    "plotly>=5.20",
+    "kaleido>=0.2.1",  # PNG export for the snapshot button
+]
+dev = [
+    "pytest>=8",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+]
+
+[project.urls]
+Homepage = "https://github.com/sashacraft2005/vol-surface"
+Issues   = "https://github.com/sashacraft2005/vol-surface/issues"
+
+# ----------------------------------------------------------------------------
+# scikit-build-core configuration.
+# ----------------------------------------------------------------------------
+[tool.scikit-build]
+# Tell CMake to build the bindings (and skip our internal C++ tests —
+# wheels shouldn't ship them).
+cmake.args = [
+    "-DVOL_BUILD_PYTHON=ON",
+    "-DVOL_BUILD_TESTS=OFF",
+]
+# The Python package lives at python/vol_surface — point setuptools at it.
+wheel.packages = ["python/vol_surface"]
+# Minimum CMake version actually shipped on common CI runners.
+cmake.version = ">=3.20"
+
+[tool.scikit-build.cmake.define]
+CMAKE_BUILD_TYPE = "Release"
+
+# ----------------------------------------------------------------------------
+# Tooling
+# ----------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+addopts = "-ra"
